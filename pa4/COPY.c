@@ -90,48 +90,37 @@ int get_avail_blkno() {
 	printf("Getting next available data block\n");
 
 	int i;
-	int get = -1; 
+	int get = 0; 
 	char buf[BLOCK_SIZE];
-	/*Bring data bitmap from disk into memory*/
-	for(i = 2; i < 6; i++){
-		memset(buf, 0, BLOCK_SIZE);
-		if(bio_read(i, buf) <= 0){
-			perror("Error reading data bitmap in tfs_init\n");
-			return -1;
-		}
-		int j;
-		for(j = 0; j < BLOCK_SIZE; j++){
-			if(buf[j] == '1') set_bitmap(dataBM, j + (i-2) * 4096);
-			else{
-				if(get < 0){
-					printf("\t\t i is %d\n\t\tj is %d\n", i, j);
-					get = j + (i-2) * 4096;
-				}
-				unset_bitmap(dataBM, j + (i-2) * 4096);
-			}
+	/*Read from disk*/
+	if(bio_read(2, buf) <= 0){
+		perror("Error reading from disk in get_avail_blkno\n");
+		return -1;
+	}
+	/*Bring inode bitmap from disk into memory*/
+	for(i = 0; i < MAX_DNUM; i++){
+		if(buf[i] == '1'){
+			set_bitmap(dataBM, i);
+		}else{
+			if(!get) get = i;
+			unset_bitmap(dataBM, i);
 		}
 	}
-
 	/*Update data bitmap*/
-	printf("Get is %d\n", get);
 	set_bitmap(dataBM, get);
-
-	printf("Writing data bitmap to disk\n");
+	
 	/*Write data bitmap from memory to disk*/
-	for(i = 2; i < 6; i++){
-		memset(buf, 0, BLOCK_SIZE);
-		int j;
-		for(j = 0; j < BLOCK_SIZE; j++){
-			if(get_bitmap(dataBM, j + (i-2) * 4096)) buf[j] = '1';
-			else buf[j] = '0';
-		}
-		if(bio_write(i, buf) < 0){
-			perror("Error writing data bitmap to disk\n");
-			return -1;
-		}
+	for(i = 0; i < MAX_DNUM; i++){
+		if(get_bitmap(dataBM, i)){
+			buf[i] = '1';
+		}else buf[i] = '0';
+	}
+	if(bio_write(2, buf) < 0){
+		perror("Error writing to disk in get_avail_blkno\n");
+		return -1;
 	}
 
-	return get; 
+	return get;
 }
 
 /* 
@@ -144,12 +133,9 @@ int readi(uint16_t ino, struct inode *inode) {
 
 
 	printf("Reading inode %hd\n", ino);
-	if(ino < 0 || ino > MAX_INUM){
-		perror("Bad inode number\n");
-		return -1;
-	}
+
 	/*Get the inode block*/
-	uint16_t block = (ino / 16) + 6;	
+	uint16_t block = (ino / 16) + 3;	
 
 	/*Read in the block*/
 	char buf[BLOCK_SIZE];
@@ -159,7 +145,7 @@ int readi(uint16_t ino, struct inode *inode) {
 		return -1;
 	}
 
-//	printf("Inode region: %s\n", buf);
+	printf("Inode region: %s\n", buf);
 
 	/*Parse the block, and extract desired inode*/
 	char *tok = strtok(buf, "|");
@@ -169,7 +155,7 @@ int readi(uint16_t ino, struct inode *inode) {
 		printf("Current inode: %d\n", curInode);
 		if(curInode == ino){
 			/*Found inode, start copying*/
-//			printf("FOUND INODE %d:\t%s\n", ino, tok);
+			printf("FOUND INODE:\t%s\n", tok);
 			sscanf(tok, "%hd;%hd;%d;%d;%d;", &inode->ino, &inode->valid, &inode->size, &inode->type, &inode->link);
 			char *tok2 = strtok(tok, ";");
 			int count = 0;
@@ -223,82 +209,32 @@ int writei(uint16_t ino, struct inode *inode) {
 
 	printf("Writing inode %d\n", ino);
 
-	if(ino < 0 || ino > MAX_INUM){
-		perror("Bad inode number\n");
-		return -1;
-	}
-
 	/*Get the inode block*/
-	uint16_t block = (ino / 16) + 6;	
+	uint16_t block = (ino / 16) + 3;	
 
-	char buf[BLOCK_SIZE];
+	char buf[256];
 	
 	sprintf(buf, "%d;%d;%d;%d;%d;", inode->ino, inode->valid, inode->size, inode->type, inode->link);
-	
-//	printf("Buf @1: %s\n", buf);
-
 	int i;
 	for(i = 0; i < 16; i++){
 		char dirptr[10];
 		sprintf(dirptr, "%d ", inode->direct_ptr[i]);
 		strcat(buf, dirptr);
-		memset(dirptr, 0, 10);
 	}
-//	printf("Buf @2: %s\n", buf);
-	strcat(buf, ";");
 	for(i = 0; i < 8; i++){
 		char indirptr[10];
 		sprintf(indirptr, "%d ", inode->indirect_ptr[i]);
 		strcat(buf, indirptr);
-		memset(indirptr, 0, 10);
 	}
-//	printf("Buf @3: %s\n", buf);
 
 	char stat[50];
-	sprintf(stat, ";%ld;%ld|", inode->vstat.st_atime, inode->vstat.st_mtime);
+	sprintf(stat, "%d;%d|", (int)inode->vstat.st_atime, (int)inode->vstat.st_mtime);
 	strcat(buf, stat);
 
-//	printf("DATA TO BE OVERWRITTEN: %s\n", buf);
-
-	char region[BLOCK_SIZE];
-	memset(region, 0, BLOCK_SIZE);
-	char newRegion[BLOCK_SIZE];
-	memset(newRegion, 0, BLOCK_SIZE);
-	/*Get entire inode region*/
-	if(bio_read(block, region) <= 0){
-		perror("Error reading inode in writei\n");
-		return -1;
-	}
-	char *tok = strtok(region, "|");
-	while(tok != NULL){
-//		printf("tok: %s\n", tok);
-		int cur = 0;
-		sscanf(tok, "%d", &cur);
-		if(cur == ino) break; //found node to overwrite
-
-		char copy[256];
-		strcpy(copy, tok);
-		strcat(copy, "|");
-		strcat(newRegion, copy);
-		tok = strtok(NULL, "|");
-	}
-	/*Skip old data*/
-	tok = strtok(NULL, "|");
-	/*Copy new data*/
-	strcat(newRegion, buf);
-	/*Continue copying*/
-	while(tok != NULL){
-		char copy[256];
-		strcpy(copy, tok);
-		strcat(copy, "|");
-		strcat(newRegion, copy);
-		tok = strtok(NULL, "|");
-	}
-
-	printf("FINAL WRITE: %s\n", newRegion);
+	printf("Final write: %s\n", buf);
 
 	/*Write inode to disk*/
-	if(bio_write(block, newRegion) < 0){
+	if(bio_write(block, buf) < 0){
 		perror("Error writing inode in writei\n");
 		return -1;
 	}
@@ -317,7 +253,7 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
   // Step 3: Read directory's data block and check each directory entry.
   //If the name matches, then copy directory entry to dirent structure
 
-	printf("----RUNNING dir_find() for '%s' using parent inode %hhd-----\n", fname, ino);
+	printf("----RUNNING dir_find()-----\n");
 	
 	/*Call readi and get inode info of current directory*/
 	struct inode *inode = malloc(sizeof(struct inode));
@@ -326,27 +262,18 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 		free(inode);
 		return -1;
 	}
-
-//	printf("inode data: %hhd, %hhd, %hd, %hd, %hd\n", inode->ino, inode->valid, inode->size, inode->type, inode->link);
-//	printf("\tinode direct pointers: ");
-	int pt;
-	for(pt = 0; pt < 16; pt++){
-		printf("%d ", inode->direct_ptr[pt]);
-	}	
-	printf("\n");
-
+	
 	char buf[BLOCK_SIZE];
 	memset(buf, 0, BLOCK_SIZE);
 	int i;
-	int empty = 1; //check to see if all direct pointers are -1
 	for(i = 0; i < 16; i++){
 		/*Scan each data block*/
 		if(inode->direct_ptr[i] != -1){
-			empty = 0;
-			if(bio_read(inode->direct_ptr[i]+70, buf) <= 0){
+			if(bio_read(inode->direct_ptr[i], buf) <= 0){
 				perror("Error reading block in dir_find\n");
 				return -1;
 			}
+			//TODO Check if buf is empty
 			printf("DATA BLOCK FOR INODE %d: %s\n", ino, buf);
 			/*Search for fname in data block*/
 			if(strstr(buf, fname)){ //fname can still be a subset of the found name
@@ -354,7 +281,7 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 				/*inode data is stored as such => 'fname': ino*/
 				char name[256];
 				int inum = 0;
-				sscanf(buf, "%s : %d", name, &inum);
+				sscanf(buf, "%s: %d", name, &inum);
 				/*Double check to ensure file names are exact matches*/
 				if(strcmp(name, fname) == 0){
 					dirent->ino = inum;
@@ -362,31 +289,18 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 					strncpy(dirent->name, fname, name_len);
 				
 					free(inode);
-//					printf("Successfully completed dir_find() for %s, found %d\n", fname, inum);
-					return 1;
+					printf("Successfully completed dir_find()\n");
+					return 0;
 				}
 			}
 			memset(buf, 0, BLOCK_SIZE);
 		}
 	}
-	if(strcmp(fname, "/") == 0){
-		printf("In root\n");
-		dirent->ino = 0;
-		dirent->valid = 1;
-		strcpy(dirent->name, "/");
-		return 0;
-	}
-	if(empty){
-		/*All direct pointers = -1. Empty directory*/
-		dirent->ino = inode->ino;
-		dirent->valid = inode->valid;
-		strncpy(dirent->name, fname, name_len);
-		free(inode);
-		printf("Empty directory\n");
-		return 0;
-	}
-	printf("Couldn't find %s\n", fname);
-	return -ENOENT;
+	
+	/*Not found*/
+	free(inode);
+	printf("Empty directory\n");
+	return 0;
 }
 
 int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t name_len) {
@@ -413,7 +327,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 	for(i = 0; i < 16; i++){
 		/*Scan each data block*/
 		if(inode->direct_ptr[i] != -1){
-			if(bio_read(inode->direct_ptr[i]+70, buf) <= 0){
+			if(bio_read(inode->direct_ptr[i], buf) <= 0){
 				perror("Error reading block in dir_add\n");
 
 				free(inode);
@@ -428,7 +342,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 					perror("Directory already exists\n");
 	
 					free(inode);
-					return -EEXIST;
+					return -1;
 				}
 			}
 			memset(buf, 0, BLOCK_SIZE);
@@ -436,21 +350,17 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 	}
 	memset(buf, 0, BLOCK_SIZE);
 	/*Create data block contents*/
-	sprintf(buf, "%s : %hhd", fname, f_ino);
-	printf("NEW DATA BLOCK: [%s]\n", buf);
+	sprintf(buf, "%s: %hd", fname, f_ino);
 	if(avail != -1){
 		/*Find next data block to put new inode info*/
 		int nextDB = get_avail_blkno();
-		printf("Next available block is %d\n", nextDB);
 		if(nextDB == -1){
 			perror("No available blocks\n");
 			free(inode);
 			return -1;
 		}
-
-		printf("Adding pointer to inode%d[%d]: %d\n", inode->ino, avail, nextDB);
 		inode->direct_ptr[avail] = nextDB;
-		inode->link++;
+
 		/*Update current inode*/
 		if(writei(inode->ino, inode) < 0){
 			perror("Error writing inode in dir_add\n");
@@ -458,8 +368,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 			return -1;
 		}
 		/*Write to new data block*/
-		printf("Writing to %d + 70\n", inode->direct_ptr[avail]);
-		if(bio_write(inode->direct_ptr[avail]+70, buf) < 0){
+		if(bio_write(nextDB, buf) < 0){
 			perror("Error writing block in dir_add\n");
 			free(inode);
 			return -1;
@@ -472,8 +381,7 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 	}
 
 	printf("----FINISHED dir_add-----\n");
-	free(inode);
-	return 0;
+	return -1;
 }
 
 int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
@@ -482,23 +390,21 @@ int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
 	// Step 2: Check if fname exist
 	// Step 3: If exist, then remove it from dir_inode's data block and write to disk
 
-	printf("-----RUNNING dir_remove for %s-----\n", fname);
+	printf("-----RUNNING dir_remove-----\n");
 
-	/*Call readi and get inode info*/
-	struct inode *inode = malloc(sizeof(struct inode));
-	if(readi(dir_inode.ino, inode) < 0){
+	struct inode *inode  = malloc(sizeof(struct inode));
+	if(readi(dir_inode.ino, inode) <= 0){
 		perror("Error reading inode in dir_remove\n");
 		return -1;
 	}
-	
 	char buf[BLOCK_SIZE];
 	memset(buf, 0, BLOCK_SIZE);
 	int i;
 	for(i = 0; i < 16; i++){
 		/*Scan each data block*/
 		if(inode->direct_ptr[i] != -1){
-			if(bio_read(inode->direct_ptr[i]+70, buf) <= 0){
-				perror("Error reading block in dir_remove\n");
+			if(bio_read(inode->direct_ptr[i], buf) <= 0){
+				perror("Error reading block in dir_add\n");
 
 				free(inode);
 				return -1;
@@ -506,86 +412,33 @@ int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
 			/*Search for fname in data block*/
 			if(strstr(buf, fname)){
 				char name[256];
-				int ino = 0;
-				sscanf(buf, "%s : %d", name, &ino);
+				int ino;
+				sscanf(buf, "%s: %d", name, &ino);
 				if(strcmp(name, fname) == 0){
-					/*Found the inode, check if it is empty*/
-					struct inode *target = malloc(sizeof(struct inode));
-					if(readi(ino, target) < 0){
-						perror("Error reading inode in dir_remove\n");
-						free(target);
-						free(inode);
-						return -1;
-					}
-					int j;
-					for(j = 0; j < 16; j++){
-						if(target->direct_ptr[j] != -1){
-							perror("Not empty\n");
-							free(target);
-							free(inode);
-							return -ENOTEMPTY;
-						}
-					}
-					unset_bitmap(inodeBM, target->ino);
-					/*Write change to inode bitmap on disk*/
-					char ibuf[BLOCK_SIZE];
-					if(bio_read(1, ibuf) <= 0){
-						perror("Error reading inode bitmap\n");
-						free(target);
-						free(inode);
-						return -1;
-					}
-					ibuf[target->ino] = '0';
-					if(bio_write(1, ibuf) <= 0){
-						perror("Error writing inode bitmap\n");
-						free(target);
-						free(inode);
-						return -1;
-					}
-					target->valid = 0;
-					/*Clear data block*/
-					memset(buf, 0, BLOCK_SIZE);
-					if(bio_write(inode->direct_ptr[i]+70, buf) < 0){
-						perror("Error writing block in dir_remove\n");
-						free(target);
-						free(inode);
-						return -1;
-					}
-					/*Clear bit in data bitmap*/
+					/*Free up spot in data bitmap*/
 					unset_bitmap(dataBM, inode->direct_ptr[i]);
-					int clear = inode->direct_ptr[i] / 4096;
-					char dbuf[BLOCK_SIZE];
-					if(bio_read(clear + 2, dbuf) < 0){
-						perror("Error reading data bitmap\n");
-						free(target);
-						free(inode);
-						return -1;	
-					}
-					dbuf[inode->direct_ptr[i]] = '0';
-					if(bio_write(clear + 2, dbuf) < 0){
-						perror("Error writing data bitmap\n");
-						free(target);
+					/*Invalidate pointer to that block*/
+					inode->direct_ptr[i] = -1;
+					/*Write inode to disk*/
+					if(writei(inode->ino, inode) < 0){
+						perror("Error writing to inode in dir_remove\n");
 						free(inode);
 						return -1;
 					}
-					/*Invalidate direct pointer*/
-					inode->direct_ptr[i] = -1;		
-					free(target);
+					/*Don't have to remove contents in data block, will be overwritten by future data*/	
+					free(inode);
+					return 0;
 				}
 			}
 			memset(buf, 0, BLOCK_SIZE);
 		}
 	}
-	/*Write inode back to disk*/
-	if(writei(inode->ino, inode) < 0){
-		perror("Error writing inode in dir_remove\n");
-		free(inode);
-		return -1;	
-	}
 
+	/*Not found*/
+	perror("Couldn't find block\n");
+	free(inode);
 
 	printf("----FINISHED dir_remove------\n");
-	free(inode);
 	return 0;
 }
 
@@ -600,71 +453,41 @@ int get_node_by_path(const char *path, uint16_t ino, struct inode *inode) {
 	printf("-----RUNNNING get_node_by_path-----\n");	
 	
 	printf("Getting node of %s\n", path);
+	size_t totalLength = strlen(path);
 
-	/*Get root's dirent info*/
+	/*Start at root*/
 	struct dirent *root = malloc(sizeof(struct dirent));
 	if(dir_find(0, "/", 1, root) < 0){
 		perror("Couldnt find the directory from root\n");
 		free(root);
-		return -ENOENT;
+		return -1;
 	}
-	printf("Root data: %s %d\n", root->name, root->ino);
 
-	printf("Finished looking at root, continuing...\n");
-	
 	/*Find the next directory*/
-	struct dirent *cur = root;
-	cur->ino = root->ino;
-	printf("\tCurrent inode: %hhd\n", cur->ino);
-	cur->valid = root->valid;
-	strcpy(cur->name, root->name);
-	printf("\t\tInode name: %s\n", cur->name);
-
-	char name[1024];
-	memset(name, 0, 1024);
-	strcpy(name, path);
-	printf("name: %s path: %s\n", name, path);
-	char *saveptr = NULL;
-	char *tok = strtok_r(name, "/", &saveptr); 
-	if(tok == NULL){ //if path that was passed in was '/'
-		printf("STILL IN ROOT\n");
-		/*Copy root's inode data*/
-		if(readi(0, inode) < 0){
-			perror("Couldn't read root in get_node_by_path\n");
-			free(root);
-			return -1;
-		}
-		free(root);
-		return 0;
-	}else{
-		/*Parse path and read inode of each token*/
-		while(tok != NULL){
-			printf("Looking for '%s' in parent inode# %d\n", tok, cur->ino);
-			int ret = 0;
-			ret = dir_find(cur->ino, tok, strlen(tok), cur);
-			if(ret == 0 || ret == -ENOENT){
-				perror("Couldn't find the directory\n");
-				free(root);
-				return -ENOENT;
-			}
-			else if(ret < 0){
-				perror("Error using dir_find in get_node_by_path\n");
-				free(root);
-				return -1; 
-			}
-			/*Copy into inode*/
-			if(readi(cur->ino, inode) < 0){
-				perror("Couldn't read node in get_node_by_path\n");
+	struct dirent *cur = root;	
+	int i, start = 0, end = 0 ;
+	for(i = 1; i <= totalLength; i++){
+		if(path[i] == '/' || i == totalLength){
+			end = i;
+			strncpy(cur->name, path+start+1, end-start-1);
+			if(dir_find(cur->ino, cur->name, strlen(cur->name), cur) < 0){
+				perror("Couldnt find the directory\n");
 				free(root);
 				return -1;
-			}
-			tok = strtok_r(NULL, "/", &saveptr);
+			} 
+			start = end;
 		}
-	}
-	printf("\tnew inode: %hhd\n", cur->ino);
-	printf("\t\tinde name: %s\n", cur->name);
-	printf("-----FINISHED RUNNING get_node_by_path--------\n");
+	}		
+		
 	free(root);
+	
+	/*Copy into inode*/
+	if(readi(cur->ino, inode) < 0){
+		perror("Couldn't read node in get_node_by_path\n");
+		return -1;
+	}
+
+	printf("-----FINISHED RUNNING get_node_by_path--------\n");
 	return cur->ino;
 }
 
@@ -679,8 +502,6 @@ int tfs_mkfs() {
 	// initialize data block bitmap
 	// update bitmap information for root directory
 	// update inode for root directory
-
-	printf("\n\n");
 
 	printf("---Running tfs_mkfs()---\n");
 
@@ -717,7 +538,7 @@ int tfs_mkfs() {
 	root->valid = 1;
 	root->size = 256;
 	root->type = 0; //0 for directory 1 for files
-	root->link = 2; //2 for . and ..
+	root->link = 0;
 	int i;
 	for(i = 0; i < 16; i++){
 		root->direct_ptr[i] = -1;
@@ -731,9 +552,9 @@ int tfs_mkfs() {
 	/* Write superblock info to diskfile
 	   Block 0 is for the superblock
  	   Block 1 is for the inode bitmap
-	   Blocks 2-5 is for the data bitmap
-	   Blocks 6-69 are for the inode blocks
-	   Blocks 70+ are for the data blocks
+	   Block 2 is for the data bitmap
+	   Blocks 3-66 are for the inode blocks
+	   Blocks 67+ are for the data blocks
 	*/
 	
 	if(!SB) SB = malloc(sizeof(struct superblock));
@@ -781,8 +602,6 @@ static void *tfs_init(struct fuse_conn_info *conn) {
 	// Step 1a: If disk file is not found, call mkfs
   // Step 1b: If disk file is found, just initialize in-memory data structures
   // and read superblock from disk
-
-	printf("\n\n");
 
 	int ret = dev_open(diskfile_path);
 	if(ret == -1){
@@ -838,7 +657,6 @@ static void *tfs_init(struct fuse_conn_info *conn) {
 		}
 		printf("Done reading inode bitmap\n");
 
-		printf("Reading data bitmap...\n");
 		/*Since MAX_DNUM = 16384, we need to store it across 4 blocks*/
 		for(i = 2; i < 6; i++){
 			memset(buf, 0, BLOCK_SIZE);
@@ -848,7 +666,8 @@ static void *tfs_init(struct fuse_conn_info *conn) {
 			}
 			int j;
 			for(j = 0; j < BLOCK_SIZE; j++){
-				if(buf[j] == '1') set_bitmap(dataBM, j + (i-2) * 4096);
+				if(buf[j] == '1') set_bitmap(dataBM, j + i * 4096);
+				else unset_bitmap(dataBM, j + i * 4096);
 			}
 		}
 	}
@@ -862,25 +681,8 @@ static void tfs_destroy(void *userdata) {
 
 	// Step 1: De-allocate in-memory data structures
 	// Step 2: Close diskfile
-
-	printf("\n\n");
 	
 	printf("\n---RUNNING tfs_destroy()---\n");	
-
-	/*Find out block usage*/
-	int i;
-	int count = 0;
-	for(i = 0; i < MAX_INUM; i++){
-		if(get_bitmap(inodeBM, i)) count++;
-	}
-
-	printf("Total number of inode blocks used: %d\n", count);
-
-	for(i = 0; i < MAX_DNUM; i++){
-		if(get_bitmap(dataBM, i)) count++;
-	}
-	
-	printf("Total number of data blocks used: %d\n", count);
 
 	free(inodeBM);
 	free(dataBM);
@@ -894,39 +696,31 @@ static int tfs_getattr(const char *path, struct stat *stbuf) {
 	// Step 1: call get_node_by_path() to get inode from path
 	// Step 2: fill attribute of file into stbuf from inode
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_getattr()---\n");
 
 	printf("Looking for attributes of %s\n", path);
 
 	struct inode *inode = malloc(sizeof(struct inode));	
-	int ino = get_node_by_path(path, 0, inode);
-	printf("GETATTR: gnbp returned %d with inode->ino %hhd\n", ino, inode->ino); 
+	int ino = get_node_by_path(path, 0, inode); 
+	if(ino < 0){
+		perror("Couldn't get node in tfs_getattr()\n");
+		free(inode);
+		return -ENOENT;
+	}
 
-	stbuf->st_ino = inode->ino;
+	stbuf->st_ino = ino;
 	stbuf->st_uid = getuid();
 	stbuf->st_gid = getgid();
 	stbuf->st_size = inode->size;
-	stbuf->st_atime = inode->vstat.st_atime;
-	stbuf->st_mtime = inode->vstat.st_mtime;
+	stbuf->st_atime = time(NULL);
+	stbuf->st_mtime = time(NULL);
 
-	if(inode->type == 0){
+	if(strcmp(path, "/") == 0){
 		stbuf->st_mode = S_IFDIR | 0755;
 		stbuf->st_nlink = 2;
 	}else{
 		stbuf->st_mode = S_IFREG | 0644;
 		stbuf->st_nlink = 1;
-	}
-
-	if(ino == -ENOENT){
-		printf("No entry for %s\n", path);
-		free(inode);
-		return -ENOENT;
-	}else if(ino != -ENOENT && ino < 0){
-		perror("Couldn't find node in tfs_getattr\n");
-		free(inode);
-		return -1;
 	}
 
 	printf("---FINISHED RUNNING tfs_getattr()---\n");
@@ -939,21 +733,18 @@ static int tfs_opendir(const char *path, struct fuse_file_info *fi) {
 	// Step 1: Call get_node_by_path() to get inode from path
 	// Step 2: If not find, return -1
 
-	printf("\n\n");
-
-	printf("---RUNNING tfs_opendir() for path %s---\n", path);
+	printf("---RUNNING tfs_opendir()---\n");
 
 	/*Check if path is valid*/
 	struct inode *inode = malloc(sizeof(struct inode));
 	int ino = get_node_by_path(path, 0, inode);
-	printf("\ttfs_opendir ino = %d but inode->ino = %hhd\n", ino, inode->ino);
-	if(inode->ino < 0){
+	if(ino < 0){
 		perror("Couldn't get node in tfs_opendir()\n");
 		free(inode);
 		return -ENOENT;
 	}
-	if(readi(inode->ino, inode) < 0){
-		perror("Error reading inode in tfs_opendir()\n");
+	if(readi(ino, inode) < 0){
+		perror("Error readin ginode in tfs_opendir()\n");
 		free(inode);	
 		return -1;
 	}
@@ -961,7 +752,7 @@ static int tfs_opendir(const char *path, struct fuse_file_info *fi) {
 	/*Path is valid, change to directory*/
 	if(chdir(path) < 0){
 		perror("Error changing directories\n");
-//		return -1;
+		return -1;
 	}
 	
 	printf("----FINISHED RUNNING tfs_opendir()----\n");
@@ -974,21 +765,18 @@ static int tfs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, o
 	// Step 1: Call get_node_by_path() to get inode from path
 	// Step 2: Read directory entries from its data blocks, and copy them to filler
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_readdir()---\n");
 	
 	printf("READING path %s\n", path);
 	/*Get inode and read it*/
 	struct inode *inode = malloc(sizeof(struct inode));
 	int ino = get_node_by_path(path, 0, inode);
-	printf("readdir ino is %d but inode->ino = %hhd\n", ino, inode->ino);
-	if(inode->ino < 0){
+	if(ino < 0){
 		perror("Error getting inode in tfs_readdir\n");
 		free(inode);
 		return -ENOENT;
 	}
-	if(readi(inode->ino, inode) < 0){
+	if(readi(ino, inode) < 0){
 		perror("Error reading inode in tfs_readdir\n");
 		return -1;
 	}
@@ -1000,19 +788,23 @@ static int tfs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, o
 	char buf[BLOCK_SIZE];
 	memset(buf, 0, BLOCK_SIZE);
 	int i;
-	/*Read the dir entries in root directory*/		
-	for(i = 0; i < 16; i++){
-		if(inode->direct_ptr[i] != -1){
-			if(bio_read(inode->direct_ptr[i]+70, buf) <= 0){
-				perror("Error reading block in tfs_readdir\n");
-				return -1;
+	if(strcmp(path, "/") == 0){
+		/*Read the dir entries in root directory*/		
+		for(i = 0; i < 16; i++){
+			if(inode->direct_ptr[i] != -1){
+				if(bio_read(inode->direct_ptr[i], buf) <= 0){
+					perror("Error reading block in tfs_readdir\n");
+					return -1;
+				}
+				char name[256];
+				memset(name, 0, 256);
+				sprintf(buf, "%s ", name);
+				filler(buffer, buf, NULL, 0); 
 			}
-			char name[256];
-			memset(name, 0, 256);
-			sscanf(buf, "%s", name);
-			printf("Name: %s\n", name);
-			filler(buffer, name, NULL, 0); 
 		}
+	}else{
+		/*Read the dir entries in the path*/		
+		filler(buffer, "ducks", NULL, 0);
 	}
 
 	printf("---FINISHED tfs_readdir()---\n");
@@ -1030,69 +822,40 @@ static int tfs_mkdir(const char *path, mode_t mode) {
 	// Step 5: Update inode for target directory
 	// Step 6: Call writei() to write inode to disk
 
-	printf("\n\n");
-
-	printf("---RUNNNING tfs_mkdir() for path %s---\n", path);
+	printf("---RUNNNING tfs_mkdir()---\n");
 
 	/*Extract dirname and basename*/	
 	char dirname[PATH_MAX];
-	memset(dirname, 0, PATH_MAX);
 	char basename[256];
-	memset(basename, 0, 256);
 
 	int i;
 	for(i = strlen(path)-1; i >=0; i--){
 		if(path[i] == '/' && i != strlen(path)-1){
 			strncpy(dirname, path, i+1);
-			strncpy(basename, path+i+1, strlen(path)-i);
+			strncpy(basename, path+i+i, strlen(path)-i);
 			strcat(dirname, "\0");
 			strcat(basename, "\0");
 			break;
 		}
 	}	
-
-	printf("dirname: %s\n", dirname);
-	printf("basename: %s\n", basename);
 	
 	/*Look for inode*/
 	struct inode inode;
-	get_node_by_path(dirname, 0, &inode);
+	int ino = get_node_by_path(path, 0, &inode);
+	if(ino < 0){
+		perror("Error getting node in tfs_mkdir\n");
+		return -ENOENT;
+	}
 	
 	/*Get available inode*/
-	int avail = get_avail_ino();
-	printf("available inode: %d\n", avail);	
-
+//	int avail = get_avail_ino();
+	
 	/*Add directory*/
-	if(dir_add(inode, avail, basename, strlen(basename)) < 0){
-		perror("Error adding directory\n");
-		return -1;
-	}
-	/*Create new inode*/
-	struct inode *new = malloc(sizeof(struct inode));
-	new->ino = avail;
-	new->valid = 1;
-	new->size = 0;
-	new->type = 0;
-	new->link = 2;
-	for(i = 0; i < 16; i++){
-		new->direct_ptr[i] = -1;
-	}
-	for(i = 0; i < 8; i++){
-		new->indirect_ptr[i] = -1;
-	}
-	time(&new->vstat.st_atime);
-	time(&new->vstat.st_mtime);
-	/*Write new inode*/
-	if(writei(avail, new) < 0){
-		perror("Error writing inode in tfs_mkdir\n");
-		return -1;
-	}
-	free(new);
-	/*Make the directory*/
-	if(mkdir(basename, mode) < 0){
-		perror("Error creating directory\n");
+//	if(dir_add(inode, ) < 0){
+//		perror("Error adding directory\n");
 //		return -1;
-	}
+//	}
+
 
 	printf("---FINISHED tfs_mkdir()---\n");
 	return 0;
@@ -1107,41 +870,9 @@ static int tfs_rmdir(const char *path) {
 	// Step 5: Call get_node_by_path() to get inode of parent directory
 	// Step 6: Call dir_remove() to remove directory entry of target directory in its parent directory
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_rmdir()---\n");
-	/*Extract dirname and basename*/	
-	char dirname[PATH_MAX];
-	memset(dirname, 0, PATH_MAX);
-	char basename[256];
-	memset(basename, 0, 256);
 
-	int i;
-	for(i = strlen(path)-1; i >=0; i--){
-		if(path[i] == '/' && i != strlen(path)-1){
-			strncpy(dirname, path, i+1);
-			strncpy(basename, path+i+1, strlen(path)-i);
-			strcat(dirname, "\0");
-			strcat(basename, "\0");
-			break;
-		}
-	}	
 
-	printf("dirname: %s\n", dirname);
-	printf("basename: %s\n", basename);
-	
-	/*Get parent*/
-	struct inode parent;
-	get_node_by_path(dirname, 0, &parent);
-	
-	/*Remove the target from the parent*/
-	int ret = 0;
-	ret = dir_remove(parent, basename, strlen(basename));
-	if(ret == -ENOTEMPTY){
-		perror("Error removing directory\n");
-		return -ENOTEMPTY;
-	}
-	printf("---FINISHED tfs_rmdir()----\n");
 	return 0;
 }
 
@@ -1160,73 +891,24 @@ static int tfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) 
 	// Step 5: Update inode for target file
 	// Step 6: Call writei() to write inode to disk
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_create()---\n");
-	/*Extract dirname and basename*/	
+
+	/*Extract dirname and basename*/
 	char dirname[PATH_MAX];
-	memset(dirname, 0, PATH_MAX);
 	char basename[256];
-	memset(basename, 0, 256);
 
 	int i;
 	for(i = strlen(path)-1; i >=0; i--){
 		if(path[i] == '/' && i != strlen(path)-1){
 			strncpy(dirname, path, i+1);
-			strncpy(basename, path+i+1, strlen(path)-i);
+			strncpy(basename, path+i+i, strlen(path)-i);
 			strcat(dirname, "\0");
 			strcat(basename, "\0");
 			break;
 		}
 	}	
 
-	printf("dirname: %s\n", dirname);
-	printf("basename: %s\n", basename);
-	
-	/*Look for inode*/
-	struct inode inode;
-	get_node_by_path(dirname, 0, &inode);
-	
-	/*Get available inode*/
-	int avail = get_avail_ino();
-	printf("available inode: %d\n", avail);	
 
-	/*Add entry*/
-	if(dir_add(inode, avail, basename, strlen(basename)) < 0){
-		perror("Error adding entry\n");
-		return -1;
-	}
-	/*Create new inode*/
-	struct inode *new = malloc(sizeof(struct inode));
-	new->ino = avail;
-	new->valid = 1;
-	new->size = 0;
-	new->type = 1;
-	new->link = 0;
-	for(i = 0; i < 16; i++){
-		new->direct_ptr[i] = -1;
-	}
-	for(i = 0; i < 8; i++){
-		new->indirect_ptr[i] = -1;
-	}
-	time(&new->vstat.st_atime);
-	time(&new->vstat.st_mtime);
-	/*Write new inode*/
-	if(writei(avail, new) < 0){
-		perror("Error writing inode in tfs_create\n");
-		return -1;
-	}
-	free(new);
-	/*Make the directory*/
-	int ret = 0;
-	ret = creat(basename, mode);
-	if(ret == -EEXIST){
-		perror("Error creating entry\n");
-		return -EEXIST;
-	}
-//		return -1;
-
-	printf("----FINISHED tfs_create---\n");
 	return 0;
 }
 
@@ -1235,34 +917,8 @@ static int tfs_open(const char *path, struct fuse_file_info *fi) {
 	// Step 1: Call get_node_by_path() to get inode from path
 	// Step 2: If not find, return -1
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_open()---\n");
 
-	/*Check if path is valid*/
-	struct inode *inode = malloc(sizeof(struct inode));
-	int ino = get_node_by_path(path, 0, inode);
-	printf("\ttfs_opendir ino = %d but inode->ino = %hhd\n", ino, inode->ino);
-	if(inode->ino < 0){
-		perror("Couldn't get node in tfs_opendir()\n");
-		free(inode);
-		return -ENOENT;
-	}
-	if(readi(inode->ino, inode) < 0){
-		perror("Error reading inode in tfs_opendir()\n");
-		free(inode);	
-		return -1;
-	}
-
-	/*Path is valid, change to directory*/
-	int ret = 0;
-	ret = open(path, O_RDWR | O_CREAT, 0777);
-	if(ret == -EACCES){
-		perror("Error changing directories\n");
-		return -EACCES;
-	}
-	
-	printf("-----FINISHED tfs_open----\n");
 	return 0;
 }
 
@@ -1273,89 +929,9 @@ static int tfs_read(const char *path, char *buffer, size_t size, off_t offset, s
 	// Step 3: copy the correct amount of data from offset to buffer
 	// Note: this function should return the amount of bytes you copied to buffer
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_read()---\n");
-	/*Get inode*/	
-	struct inode *inode = malloc(sizeof(struct inode));
-	get_node_by_path(path, 0, inode);
-	if(inode->ino < 0){
-		perror("Couldn't get node in tfs_read\n");
-		free(inode);
-		return -ENOENT;
-	}
-	/*Check if file or directory*/
-	if(inode->type == 0){
-		perror("Cannot write to directory\n");
-		free(inode);
-		return -EISDIR;
-	}
-	
-	/*Read n blocks based on size*/
-	int numBlocks = size / BLOCK_SIZE;
-	if(numBlocks * BLOCK_SIZE > size) numBlocks++;
 
-	char buf[BLOCK_SIZE];
-	memset(buf, 0, BLOCK_SIZE);
-
-	/*First read to handle offset*/
-	if(bio_read(inode->direct_ptr[0], buf) <= 0){
-		perror("Error reading first block in tfs_read\n");
-		free(inode);
-		return -1;
-	}
-
-	strcpy(buffer, buf+offset);
-
-	/*Check to see if we have to read multiple blocks*/
-	if(size < BLOCK_SIZE){
-		printf("----FINISHED tfs_read\n");
-		free(inode);
-		return size;
-	}
-
-	/*Begin reading direct pointers*/
-	int i;
-	for(i = 1; i < numBlocks && i < 16; i++){
-		memset(buf, 0, BLOCK_SIZE);
-		if(bio_read(inode->direct_ptr[i], buf) <= 0){
-			perror("Error reading block in tfs_read\n");
-			free(inode);
-			return -1;
-		}
-		strcat(buffer, buf);
-	}
-	/*Start reading indirect blocks*/
-	if(numBlocks-i > 0){
-		for(i = 0; i < 8; i++){
-			if(inode->indirect_ptr[i] != -1){
-				char ptrs[BLOCK_SIZE];
-				memset(ptrs, 0, BLOCK_SIZE);
-				/*Read indirect pointers block*/
-				if(bio_read(inode->indirect_ptr[i]+70, ptrs) <= 0){
-					perror("Error reading indirect pointers block in tfs_read\n");
-					free(inode);
-					return -1;
-				}
-				/*Parse through the indirect pointers and read the blocks*/
-				char *tok = strtok(ptrs, ";");
-				while(tok != NULL){
-					memset(buf, 0, BLOCK_SIZE);
-					if(bio_read(atoi(tok), buf) <= 0){
-						perror("Error reading from indirect pointers block in tfs_read\n");
-						free(inode);
-						return -1;
-					}
-					strcat(buffer, buf);
-					tok = strtok(NULL, ";");
-				}
-			}
-		}
-	}
-
-	free(inode);
-	printf("---FINISHED tfs_read()---\n");
-	return size;
+	return 0;
 }
 
 static int tfs_write(const char *path, const char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
@@ -1365,124 +941,9 @@ static int tfs_write(const char *path, const char *buffer, size_t size, off_t of
 	// Step 4: Update the inode info and write it to disk
 	// Note: this function should return the amount of bytes you write to disk
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_write()---\n");
-	/*Get inode*/	
-	struct inode *inode = malloc(sizeof(struct inode));
-	get_node_by_path(path, 0, inode);
-	if(inode->ino < 0){
-		perror("Couldn't get node in tfs_write\n");
-		free(inode);
-		return -ENOENT;
-	}
-	/*Check if file or directory*/
-	if(inode->type == 0){
-		perror("Cannot write to directory\n");
-		free(inode);
-		return -EISDIR;
-	}
-	
-	/*Read n blocks based on size*/
-	int numBlocks = size / BLOCK_SIZE;
-	if(numBlocks * BLOCK_SIZE > size) numBlocks++;
-	
 
-	/*Create a manipulatable copy of buffer*/
-	int len = size;
-	char copy[size];
-	memset(copy, 0, size);
-	strncpy(copy, buffer+offset, size);
-	//printf("COPY: %s\n", copy);
 
-	char buf[BLOCK_SIZE];
-	memset(buf, 0, BLOCK_SIZE);
-
-	int i;
-	/*Copy data into direct blocks*/
-	for(i = 0; i < numBlocks && i < 16; i++){
-		if(len == 0) break;
-
-		int avail = get_avail_blkno();
-		inode->direct_ptr[i] = avail;
-
-		if(len >= BLOCK_SIZE){
-			/*Split copy into BLOCK_SIZE chunks*/
-			strncpy(buf, copy, BLOCK_SIZE);
-			len = len-BLOCK_SIZE >= 0 ? len-BLOCK_SIZE : len;
-			char temp[size];
-			memset(temp, 0, size);
-			strcpy(temp, copy+BLOCK_SIZE); //copy remainder of buffer
-			memset(copy, 0, size);
-			strcpy(copy, temp); //put remainder back into copy
-		}else{
-			strncpy(buf, copy, len);
-			len = 0;
-		}
-						
-		if(bio_write(avail+70, buf) < 0){
-			perror("Error writing block in tfs_write\n");
-			free(inode);
-			return -1;
-		}
-	}
-	/*Couldn't fit all data into direct pointers*/
-	if(numBlocks-i > 0 && len != 0){
-		for(i = 0; i < 8; i++){
-			if(inode->indirect_ptr[i] == -1){
-				int indir = get_avail_blkno(); //hold up to 1024 data block pointers
-				inode->indirect_ptr[i] = indir;
-				char ptrs[BLOCK_SIZE];
-				memset(ptrs, 0, BLOCK_SIZE);
-
-				int count = 0;
-				while(count < 1024 && len != 0){
-					/*Get data block*/
-					int avail = get_avail_blkno();
-					sprintf(ptrs, "%d;", avail); //put data block number in indirect pointer data block
-					if(len >= BLOCK_SIZE){
-						/*Split copy into BLOCK_SIZE chunks*/
-						strncpy(buf, copy, BLOCK_SIZE);
-						len = len-BLOCK_SIZE >= 0 ? len-BLOCK_SIZE : len;
-						char temp[size];
-						memset(temp, 0, size);
-						strcpy(temp, copy+BLOCK_SIZE); //copy remainder of buffer
-						memset(copy, 0, size);
-						strcpy(copy, temp); //put remainder back into copy
-					}else{
-						strncpy(buf, copy, len);
-						len = 0;
-					}
-			
-					/*Write data block*/
-					if(bio_write(avail+70, buf) < 0){
-						perror("Error writing block in tfs_write\n");
-						free(inode);
-						return -1;
-					}	
-					count++;
-				}	
-				/*Write indirect data block*/
-				if(bio_write(indir+70, ptrs) < 0){
-					perror("Error writing indirect pointers\n");
-					free(inode);
-					return -1;
-				}
-				/*Managed to fit data into one indirect block*/
-				if(count < 1024) break; 
-			}
-		}
-	}
-	/*Update inode information*/
-	inode->size += size;
-	if(writei(inode->ino, inode) < 0){
-		perror("Error writing inode in tfs_write\n");
-		free(inode);
-		return -1;
-	}
-
-	printf("---FINISHED tfs_write()---\n");
-	free(inode);
 	return size;
 }
 
@@ -1495,42 +956,8 @@ static int tfs_unlink(const char *path) {
 	// Step 5: Call get_node_by_path() to get inode of parent directory
 	// Step 6: Call dir_remove() to remove directory entry of target file in its parent directory
 
-	printf("\n\n");
-
 	printf("---RUNNING tfs_unlink()---\n");
-	/*Extract dirname and basename*/	
-	char dirname[PATH_MAX];
-	memset(dirname, 0, PATH_MAX);
-	char basename[256];
-	memset(basename, 0, 256);
 
-	int i;
-	for(i = strlen(path)-1; i >=0; i--){
-		if(path[i] == '/' && i != strlen(path)-1){
-			strncpy(dirname, path, i+1);
-			strncpy(basename, path+i+1, strlen(path)-i);
-			strcat(dirname, "\0");
-			strcat(basename, "\0");
-			break;
-		}
-	}	
-
-	printf("dirname: %s\n", dirname);
-	printf("basename: %s\n", basename);
-	
-	/*Get parent*/
-	struct inode parent;
-	get_node_by_path(dirname, 0, &parent);
-	
-	/*Remove the target from the parent*/
-	int ret = 0;
-	ret = dir_remove(parent, basename, strlen(basename));
-	if(ret == -ENOENT){
-		perror("Error removing directory\n");
-		return -ENOENT;
-	}
-
-	printf("---FINISHED tfs_unlink()---\n");
 	return 0;
 }
 
@@ -1589,7 +1016,7 @@ int main(int argc, char *argv[]) {
 	getcwd(diskfile_path, PATH_MAX);
 	strcat(diskfile_path, "/DISKFILE");
 
-//	printf("Current path: %s\n", diskfile_path);
+	printf("Current path: %s\n", diskfile_path);
 
 	fuse_stat = fuse_main(argc, argv, &tfs_ope, NULL);
 

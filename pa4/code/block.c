@@ -41,6 +41,7 @@ void dev_init(const char* diskfile_path) {
 
 //Function to open the disk file
 int dev_open(const char* diskfile_path) {
+
     if (diskfile >= 0) {
 		return 0;
     }
@@ -54,6 +55,7 @@ int dev_open(const char* diskfile_path) {
 }
 
 void dev_close() {
+
     if (diskfile >= 0) {
 		close(diskfile);
     }
@@ -61,6 +63,7 @@ void dev_close() {
 
 //Read a block from the disk
 int bio_read(const int block_num, void *buf) {
+
     int retstat = 0;
     retstat = pread(diskfile, buf, BLOCK_SIZE, block_num*BLOCK_SIZE);
     if (retstat <= 0) {
@@ -74,6 +77,7 @@ int bio_read(const int block_num, void *buf) {
 
 //Write a block to the disk
 int bio_write(const int block_num, const void *buf) {
+
     int retstat = 0;
     retstat = pwrite(diskfile, buf, BLOCK_SIZE, block_num*BLOCK_SIZE);
     if (retstat < 0) {
